@@ -1,0 +1,241 @@
+# docker-compose.yml
+name: local-dev-infrastructure
+
+services:
+  # ==========================================
+  # CORE INFRASTRUCTURE
+  # Starts by default
+  # ==========================================
+
+  mongodb:
+    image: mongo:8
+    container_name: senserank-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-password}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb-data:/data/db
+    networks:
+      - local-infra-network
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --username
+        - ${MONGO_USERNAME:-admin}
+        - --password
+        - ${MONGO_PASSWORD:-password}
+        - --authenticationDatabase
+        - admin
+        - --eval
+        - "db.adminCommand('ping').ok"
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  opensearch:
+    image: opensearchproject/opensearch:2.19.1
+    container_name: senserank-opensearch
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    networks:
+      - local-infra-network
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://localhost:9200 >/dev/null || exit 1
+      interval: 20s
+      timeout: 10s
+      retries: 20
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: senserank-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - local-infra-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  documentdb:
+    image: ghcr.io/documentdb/documentdb/documentdb-local:latest
+    container_name: senserank-docdb
+    restart: unless-stopped
+    command:
+      - "--username"
+      - ${DOCDB_USERNAME:-admin}
+      - "--password"
+      - ${DOCDB_PASSWORD:-password}
+    ports:
+      - "10260:10260"
+    volumes:
+      - docdb-data:/data
+    networks:
+      - local-infra-network
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - localhost:10260
+        - -u
+        - ${DOCDB_USERNAME:-admin}
+        - -p
+        - ${DOCDB_PASSWORD:-password}
+        - --authenticationMechanism
+        - SCRAM-SHA-256
+        - --tls
+        - --tlsAllowInvalidCertificates
+        - --eval
+        - "db.adminCommand('ping').ok"
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ==========================================
+  # AI / ML PROFILE
+  # docker compose --profile ai up -d
+  # ==========================================
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: senserank-ollama
+    restart: unless-stopped
+    profiles:
+      - ai
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - local-infra-network
+
+  # ==========================================
+  # DATABASE PROFILE
+  # docker compose --profile database up -d
+  # ==========================================
+
+  postgresql:
+    image: pgvector/pgvector:pg17
+    container_name: senserank-postgresql
+    restart: unless-stopped
+    profiles:
+      - database
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-senserank}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgresql-data:/var/lib/postgresql/data
+    networks:
+      - local-infra-network
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ==========================================
+  # MONITORING PROFILE
+  # docker compose --profile monitoring up -d
+  # ==========================================
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: senserank-prometheus
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+    networks:
+      - local-infra-network
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --spider
+        - -q
+        - http://localhost:9090/-/healthy
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: senserank-grafana
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    networks:
+      - local-infra-network
+
+# ==========================================
+# NETWORKS
+# ==========================================
+
+networks:
+  local-infra-network:
+    name: local-infra-network
+    driver: bridge
+
+# ==========================================
+# PERSISTENT VOLUMES
+# ==========================================
+
+volumes:
+  mongodb-data:
+  opensearch-data:
+  redis-data:
+  docdb-data:
+  ollama-data:
+  postgresql-data:
+  prometheus-data:
+  grafana-data:
